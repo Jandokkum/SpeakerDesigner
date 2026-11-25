@@ -55,9 +55,9 @@ def fetch_url(url,max_bytes=MAX_BYTES):
         return ct,data
 
 def _normalize_result(title, link, snippet=''):
-    title=re.sub(r'\\s+',' ',html.unescape(title or '')).strip()
+    title=re.sub(r'\s+',' ',html.unescape(title or '')).strip()
     link=html.unescape((link or '').strip())
-    snippet=re.sub(r'\\s+',' ',html.unescape(snippet or '')).strip()
+    snippet=re.sub(r'\s+',' ',html.unescape(snippet or '')).strip()
     if not title or not link or not link.startswith(('http://','https://')): return None
     return {'title':title,'url':link,'snippet':snippet,'is_pdf':link.lower().endswith('.pdf') or 'pdf' in title.lower()}
 

@@ -9,21 +9,31 @@ USER_AGENT='Mozilla/5.0 (compatible; SpeakerDesigner/2.5.2)'
 MAX_BYTES=12_000_000
 
 class DDGParser(HTMLParser):
-    """Parse DuckDuckGo HTML results without depending on brittle nested markup."""
+    """Parse DuckDuckGo HTML results while preserving nested snippet markup."""
     def __init__(self):
-        super().__init__(); self.items=[]; self.current=None; self.capture=None
+        super().__init__(); self.items=[]; self.current=None; self.capture=None; self.snippet_depth=0
     def handle_starttag(self,tag,attrs):
         a=dict(attrs); cls=a.get('class','')
+        if self.capture=='snippet':
+            self.snippet_depth+=1
+            return
         if tag=='a' and ('result__a' in cls or 'result__url' in cls):
             if self.current and self.current.get('title'): self.items.append(self.current)
             self.current={'title':'','url':a.get('href',''),'snippet':''}; self.capture='title'
         elif self.current and tag in ('div','span') and 'result__snippet' in cls:
-            self.capture='snippet'
+            self.capture='snippet'; self.snippet_depth=1
+    def handle_startendtag(self,tag,attrs):
+        self.handle_starttag(tag,attrs); self.handle_endtag(tag)
     def handle_endtag(self,tag):
-        if tag=='a' and self.capture=='title': self.capture=None
-        elif tag in ('div','span') and self.capture=='snippet': self.capture=None
+        if self.capture=='title' and tag=='a':
+            self.capture=None
+        elif self.capture=='snippet':
+            self.snippet_depth-=1
+            if self.snippet_depth<=0:
+                self.snippet_depth=0; self.capture=None
     def handle_data(self,data):
-        if self.current and self.capture in ('title','snippet'): self.current[self.capture]+=data
+        if self.current and self.capture in ('title','snippet'):
+            self.current[self.capture]+=data
     def close(self):
         super().close()
         if self.current and self.current.get('title'): self.items.append(self.current)

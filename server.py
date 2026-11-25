@@ -55,26 +55,38 @@ def fetch_url(url,max_bytes=MAX_BYTES):
         if len(data)>max_bytes: raise ValueError('Bestand te groot voor import (limiet 12 MB).')
         return ct,data,cd
 
+def unwrap_search_url(link):
+    """Decode search-engine redirect wrappers to the actual destination."""
+    for _ in range(3):
+        u=urllib.parse.urlparse(link)
+        qs=urllib.parse.parse_qs(u.query)
+        candidate=(qs.get('uddg') or qs.get('url') or qs.get('q') or [None])[0]
+        if candidate and candidate.startswith(('http://','https://')):
+            link=candidate
+        else:
+            break
+    return link
+
 def search(query):
     queries=[
         query+' loudspeaker driver datasheet T/S parameters',
         query+' Thiele Small parameters pdf',
-        query+' site:manufacturer datasheet speaker driver',
+        query+' speaker manufacturer datasheet',
     ]
     out=[]; seen=set()
     for term in queries:
-        q=urllib.parse.quote(term)
-        url='https://html.duckduckgo.com/html/?q='+q
+        url='https://html.duckduckgo.com/html/?q='+urllib.parse.quote(term)
         req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT})
-        with OPENER.open(req,timeout=20) as r: raw=r.read(3_000_000).decode('utf-8','replace')
+        with OPENER.open(req,timeout=20) as r:
+            raw=r.read(3_000_000).decode('utf-8','replace')
         parser=DDGParser(); parser.feed(raw); parser.close()
         for x in parser.items:
             link=unwrap_search_url(x.get('url','').strip())
-            title=re.sub(r'\\s+',' ',x.get('title','')).strip()
-            snip=re.sub(r'\\s+',' ',x.get('snippet','')).strip()
+            title=re.sub(r'\s+',' ',x.get('title','')).strip()
+            snip=re.sub(r'\s+',' ',x.get('snippet','')).strip()
             if not link or not title or link in seen: continue
             seen.add(link)
-            pdfish=bool(re.search(r'\\.pdf(?:$|[?#])',link,re.I) or 'pdf' in title.lower() or 'datasheet' in title.lower())
+            pdfish=bool(re.search(r'\.pdf(?:$|[?#])',link,re.I) or 'pdf' in title.lower() or 'datasheet' in title.lower())
             out.append({'title':title,'url':link,'snippet':snip,'is_pdf':pdfish})
         if len(out)>=8: break
     return out[:15]
@@ -103,11 +115,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if p.path=='/api/pdf':
             url=urllib.parse.parse_qs(p.query).get('url',[''])[0]
             try:
-                ct,data=fetch_url(url)
-                if b'%PDF' in data[:2048:]: textout=pdf_text(data)
-                elif 'html' in ct or data[:100].lower().find(b'<html')>=0: textout=html_text(data)
-                else: return self._json({'error':'Bron is geen PDF of HTML.'},400)
-                return self._json({'text':textout,'bytes':len(data),'content_type':ct})
+                ct,data,cd=fetch_url(url)
+                is_pdf=(b'%PDF' in data[:4096] or 'application/pdf' in ct or '.pdf' in cd.lower())
+                is_html=('html' in ct or data[:512].lower().find(b'<html')>=0 or data[:512].lower().find(b'<!doctype html')>=0)
+                if is_pdf: textout=pdf_text(data)
+                elif is_html: textout=html_text(data)
+                else: return self._json({'error':'Bron is geen herkenbare PDF of HTML. Content-Type: '+ct},400)
+                return self._json({'text':textout,'bytes':len(data),'content_type':ct,'source_type':'pdf' if is_pdf else 'html'})
             except Exception as e: return self._json({'error':str(e)},502)
         if p.path in ('/','/index.html'):
             self.path='/index.html'

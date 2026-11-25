@@ -54,21 +54,51 @@ def fetch_url(url,max_bytes=MAX_BYTES):
         if len(data)>max_bytes: raise ValueError('Bestand te groot voor import (limiet 12 MB).')
         return ct,data
 
-def search(query):
+def _normalize_result(title, link, snippet=''):
+    title=re.sub(r'\\s+',' ',html.unescape(title or '')).strip()
+    link=html.unescape((link or '').strip())
+    snippet=re.sub(r'\\s+',' ',html.unescape(snippet or '')).strip()
+    if not title or not link or not link.startswith(('http://','https://')): return None
+    return {'title':title,'url':link,'snippet':snippet,'is_pdf':link.lower().endswith('.pdf') or 'pdf' in title.lower()}
+
+def _search_bing_rss(query):
+    import xml.etree.ElementTree as ET
+    q=urllib.parse.quote(query+' loudspeaker driver T/S parameters datasheet')
+    url='https://www.bing.com/search?format=rss&q='+q
+    req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT,'Accept':'application/rss+xml, application/xml'})
+    with OPENER.open(req,timeout=18) as r: raw=r.read(2_000_000)
+    root=ET.fromstring(raw); results=[]
+    for item in root.findall('.//item'):
+        x=_normalize_result(item.findtext('title',''),item.findtext('link',''),item.findtext('description',''))
+        if x: results.append(x)
+    return results
+
+def _search_ddg_html(query):
     q=urllib.parse.quote(query+' loudspeaker driver T/S parameters datasheet')
     url='https://html.duckduckgo.com/html/?q='+q
     req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT})
-    with OPENER.open(req,timeout=20) as r: raw=r.read(3_000_000).decode('utf-8','replace')
+    with OPENER.open(req,timeout=18) as r: raw=r.read(3_000_000).decode('utf-8','replace')
     parser=DDGParser(); parser.feed(raw); parser.close(); out=[]
-    for x in parser.items:
-        link=x.get('url','').strip()
+    for item in parser.items:
+        link=item.get('url','').strip()
         if 'duckduckgo.com/l/' in link:
             try: link=urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('uddg',[link])[0]
             except Exception: pass
-        title=re.sub(r'\s+',' ',x.get('title','')).strip(); snip=re.sub(r'\s+',' ',x.get('snippet','')).strip()
-        if link and title and link not in [z['url'] for z in out]:
-            out.append({'title':title,'url':link,'snippet':snip,'is_pdf':link.lower().endswith('.pdf') or 'pdf' in title.lower()})
-    return out[:12]
+        x=_normalize_result(item.get('title',''),link,item.get('snippet',''))
+        if x: out.append(x)
+    return out
+
+def search(query):
+    results=[]; errors=[]
+    for name,fn in [('Bing RSS',_search_bing_rss),('DuckDuckGo',_search_ddg_html)]:
+        try:
+            items=fn(query)
+            for item in items:
+                if item['url'] not in [r['url'] for r in results]: results.append(item)
+        except Exception as e: errors.append(name+': '+str(e))
+    if not results and errors:
+        raise RuntimeError('Geen zoekresultaten. Fouten van zoekproviders: '+' | '.join(errors))
+    return results[:12]
 def html_text(data):
     raw=data.decode('utf-8','replace'); raw=re.sub(r'(?is)<script.*?</script>|<style.*?</style>', ' ', raw); raw=re.sub(r'(?is)<[^>]+>', ' ', raw)
     return html.unescape(re.sub(r'\s+',' ',raw))[:120000]

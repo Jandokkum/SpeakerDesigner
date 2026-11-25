@@ -9,25 +9,24 @@ USER_AGENT='Mozilla/5.0 (compatible; SpeakerDesigner/2.5.2)'
 MAX_BYTES=12_000_000
 
 class DDGParser(HTMLParser):
-    def __init__(self): super().__init__(); self.items=[]; self.current=None; self.capture=None; self.depth=0
+    """Parse DuckDuckGo HTML results without depending on brittle nested markup."""
+    def __init__(self):
+        super().__init__(); self.items=[]; self.current=None; self.capture=None
     def handle_starttag(self,tag,attrs):
         a=dict(attrs); cls=a.get('class','')
         if tag=='a' and ('result__a' in cls or 'result__url' in cls):
-            if self.current: self.items.append(self.current)
+            if self.current and self.current.get('title'): self.items.append(self.current)
             self.current={'title':'','url':a.get('href',''),'snippet':''}; self.capture='title'
-        elif self.current and tag in ('a','div','span') and 'result__snippet' in cls:
-            self.capture='snippet'; self.depth=0
-        elif self.capture=='snippet': self.depth+=1
+        elif self.current and tag in ('div','span') and 'result__snippet' in cls:
+            self.capture='snippet'
     def handle_endtag(self,tag):
-        if self.capture=='title' and tag=='a': self.capture=None
-        elif self.capture=='snippet' and tag in ('div','span'):
-            self.depth-=1
-            if self.depth<=0: self.capture=None
+        if tag=='a' and self.capture=='title': self.capture=None
+        elif tag in ('div','span') and self.capture=='snippet': self.capture=None
     def handle_data(self,data):
         if self.current and self.capture in ('title','snippet'): self.current[self.capture]+=data
     def close(self):
         super().close()
-        if self.current: self.items.append(self.current)
+        if self.current and self.current.get('title'): self.items.append(self.current)
 
 def validate_public_url(url):
     u=urllib.parse.urlparse(url)
@@ -48,27 +47,37 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 OPENER=urllib.request.build_opener(SafeRedirect())
 def fetch_url(url,max_bytes=MAX_BYTES):
     validate_public_url(url)
-    req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT})
-    with OPENER.open(req,timeout=18) as r:
-        ct=r.headers.get('Content-Type','').lower(); data=r.read(max_bytes+1)
+    req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT,'Accept':'application/pdf,text/html,*/*'})
+    with OPENER.open(req,timeout=22) as r:
+        ct=r.headers.get('Content-Type','').lower()
+        cd=r.headers.get('Content-Disposition','')
+        data=r.read(max_bytes+1)
         if len(data)>max_bytes: raise ValueError('Bestand te groot voor import (limiet 12 MB).')
-        return ct,data
+        return ct,data,cd
 
 def search(query):
-    q=urllib.parse.quote(query+' loudspeaker driver T/S parameters datasheet')
-    url='https://html.duckduckgo.com/html/?q='+q
-    req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT})
-    with OPENER.open(req,timeout=20) as r: raw=r.read(3_000_000).decode('utf-8','replace')
-    parser=DDGParser(); parser.feed(raw); parser.close(); out=[]
-    for x in parser.items:
-        link=x.get('url','').strip()
-        if 'duckduckgo.com/l/' in link:
-            try: link=urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get('uddg',[link])[0]
-            except Exception: pass
-        title=re.sub(r'\s+',' ',x.get('title','')).strip(); snip=re.sub(r'\s+',' ',x.get('snippet','')).strip()
-        if link and title and link not in [z['url'] for z in out]:
-            out.append({'title':title,'url':link,'snippet':snip,'is_pdf':link.lower().endswith('.pdf') or 'pdf' in title.lower()})
-    return out[:12]
+    queries=[
+        query+' loudspeaker driver datasheet T/S parameters',
+        query+' Thiele Small parameters pdf',
+        query+' site:manufacturer datasheet speaker driver',
+    ]
+    out=[]; seen=set()
+    for term in queries:
+        q=urllib.parse.quote(term)
+        url='https://html.duckduckgo.com/html/?q='+q
+        req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT})
+        with OPENER.open(req,timeout=20) as r: raw=r.read(3_000_000).decode('utf-8','replace')
+        parser=DDGParser(); parser.feed(raw); parser.close()
+        for x in parser.items:
+            link=unwrap_search_url(x.get('url','').strip())
+            title=re.sub(r'\\s+',' ',x.get('title','')).strip()
+            snip=re.sub(r'\\s+',' ',x.get('snippet','')).strip()
+            if not link or not title or link in seen: continue
+            seen.add(link)
+            pdfish=bool(re.search(r'\\.pdf(?:$|[?#])',link,re.I) or 'pdf' in title.lower() or 'datasheet' in title.lower())
+            out.append({'title':title,'url':link,'snippet':snip,'is_pdf':pdfish})
+        if len(out)>=8: break
+    return out[:15]
 def html_text(data):
     raw=data.decode('utf-8','replace'); raw=re.sub(r'(?is)<script.*?</script>|<style.*?</style>', ' ', raw); raw=re.sub(r'(?is)<[^>]+>', ' ', raw)
     return html.unescape(re.sub(r'\s+',' ',raw))[:120000]

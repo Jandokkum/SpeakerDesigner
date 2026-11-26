@@ -9,20 +9,23 @@ USER_AGENT='Mozilla/5.0 (compatible; SpeakerDesigner/2.5.2)'
 MAX_BYTES=12_000_000
 
 class DDGParser(HTMLParser):
-    def __init__(self): super().__init__(); self.items=[]; self.current=None; self.capture=None; self.depth=0
+    def __init__(self):
+        super().__init__(); self.items=[]; self.current=None; self.capture=None; self.result_depth=0; self.snippet_depth=0
     def handle_starttag(self,tag,attrs):
         a=dict(attrs); cls=a.get('class','')
+        if 'result' in cls.split(): self.result_depth+=1
+        if 'result__snippet' in cls.split() or 'result-snippet' in cls.split():
+            self.capture='snippet'; self.snippet_depth=1
+        elif self.capture=='snippet': self.snippet_depth+=1
         if tag=='a' and ('result__a' in cls or 'result__url' in cls):
-            if self.current: self.items.append(self.current)
-            self.current={'title':'','url':a.get('href',''),'snippet':''}; self.capture='title'
-        elif self.current and tag in ('a','div','span') and 'result__snippet' in cls:
-            self.capture='snippet'; self.depth=0
-        elif self.capture=='snippet': self.depth+=1
+            self.current={'title':'','url':a.get('href',''),'snippet':''}
+            self.capture='title'
     def handle_endtag(self,tag):
         if self.capture=='title' and tag=='a': self.capture=None
-        elif self.capture=='snippet' and tag in ('div','span'):
-            self.depth-=1
-            if self.depth<=0: self.capture=None
+        elif self.capture=='snippet':
+            self.snippet_depth-=1
+            if self.snippet_depth<=0: self.capture=None
+        if tag in ('div','section') and self.result_depth>0: self.result_depth-=1
     def handle_data(self,data):
         if self.current and self.capture in ('title','snippet'): self.current[self.capture]+=data
     def close(self):
@@ -60,6 +63,7 @@ def search(query):
     req=urllib.request.Request(url,headers={'User-Agent':USER_AGENT})
     with OPENER.open(req,timeout=20) as r: raw=r.read(3_000_000).decode('utf-8','replace')
     parser=DDGParser(); parser.feed(raw); parser.close(); out=[]
+    if any(x in raw.lower() for x in ('captcha','anomaly detected','bots use duckduckgo')): raise RuntimeError('Zoekmachine blokkeert automatisch zoeken (captcha).')
     for x in parser.items:
         link=x.get('url','').strip()
         if 'duckduckgo.com/l/' in link:
@@ -68,6 +72,7 @@ def search(query):
         title=re.sub(r'\s+',' ',x.get('title','')).strip(); snip=re.sub(r'\s+',' ',x.get('snippet','')).strip()
         if link and title and link not in [z['url'] for z in out]:
             out.append({'title':title,'url':link,'snippet':snip,'is_pdf':link.lower().endswith('.pdf') or 'pdf' in title.lower()})
+    if not out: raise RuntimeError('Geen zoekresultaten herkend. De zoekpagina is mogelijk gewijzigd of bevat geen resultaten.')
     return out[:12]
 def html_text(data):
     raw=data.decode('utf-8','replace'); raw=re.sub(r'(?is)<script.*?</script>|<style.*?</style>', ' ', raw); raw=re.sub(r'(?is)<[^>]+>', ' ', raw)
@@ -95,7 +100,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             url=urllib.parse.parse_qs(p.query).get('url',[''])[0]
             try:
                 ct,data=fetch_url(url)
-                if b'%PDF' in data[:2048:]: textout=pdf_text(data)
+                if b'%PDF' in data[:2048:] or 'pdf' in ct or urllib.parse.urlparse(url).path.lower().endswith('.pdf'): textout=pdf_text(data)
                 elif 'html' in ct or data[:100].lower().find(b'<html')>=0: textout=html_text(data)
                 else: return self._json({'error':'Bron is geen PDF of HTML.'},400)
                 return self._json({'text':textout,'bytes':len(data),'content_type':ct})
